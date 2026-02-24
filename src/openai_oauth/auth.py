@@ -44,6 +44,29 @@ CALLBACK_PORT = _parse_port()
 # The authorization code never leaves the local machine.
 REDIRECT_URI = f"http://localhost:{CALLBACK_PORT}/auth/callback"
 
+_LOCALHOST_HOSTS = frozenset({"localhost", "127.0.0.1", "[::1]"})
+
+
+def _is_localhost_host(host_header: str) -> bool:
+    """Return True if the Host header value refers to a loopback address.
+
+    Extracts the hostname (stripping port), normalizes case, and checks
+    against an exact allowlist to prevent DNS rebinding attacks where
+    an attacker-controlled domain like ``localhost.evil.com`` resolves to
+    127.0.0.1.
+    """
+    host = host_header.strip()
+    if host.startswith("["):
+        # IPv6 bracket notation: [::1] or [::1]:port
+        bracket_end = host.find("]")
+        hostname = host[: bracket_end + 1] if bracket_end != -1 else host
+    elif ":" in host:
+        # hostname:port — strip port
+        hostname = host.rsplit(":", 1)[0]
+    else:
+        hostname = host
+    return hostname.lower() in _LOCALHOST_HOSTS
+
 
 # --- PKCE ---
 
@@ -135,6 +158,13 @@ def login() -> str:
     class CallbackHandler(BaseHTTPRequestHandler):
         def do_GET(self):
             nonlocal received_code
+
+            # DNS rebinding defense: reject requests from non-loopback Host
+            if not _is_localhost_host(self.headers.get("Host", "")):
+                self.send_response(403)
+                self.end_headers()
+                return
+
             parsed = urlparse(self.path)
 
             if parsed.path == "/auth/callback":
@@ -241,6 +271,14 @@ def login_with_server(
 
     class CallbackHandler(BaseHTTPRequestHandler):
         def do_GET(self):
+            # DNS rebinding defense: reject requests from non-loopback Host
+            # Skip when bound to 0.0.0.0 (Docker) where Host will be external
+            if bind_address in ("127.0.0.1", "::1"):
+                if not _is_localhost_host(self.headers.get("Host", "")):
+                    self.send_response(403)
+                    self.end_headers()
+                    return
+
             parsed = urlparse(self.path)
             if parsed.path != "/auth/callback":
                 self.send_response(404)
