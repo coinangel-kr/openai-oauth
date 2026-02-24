@@ -3,6 +3,7 @@
 import base64
 import hashlib
 import logging
+import os
 import secrets
 import threading
 import time
@@ -11,8 +12,6 @@ from html import escape
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from threading import Event
 from urllib.parse import parse_qs, urlencode, urlparse
-
-import httpx
 
 from .tokens import (
     CLIENT_ID,
@@ -26,7 +25,23 @@ from .tokens import (
 logger = logging.getLogger(__name__)
 
 AUTH_ENDPOINT = "https://auth.openai.com/oauth/authorize"
-CALLBACK_PORT = 1455
+
+
+def _parse_port() -> int:
+    raw = os.environ.get("OPENAI_OAUTH_PORT", "1455")
+    try:
+        port = int(raw)
+    except ValueError:
+        raise ValueError(f"OPENAI_OAUTH_PORT must be an integer, got: {raw!r}") from None
+    if not (1 <= port <= 65535):
+        raise ValueError(f"OPENAI_OAUTH_PORT must be 1-65535, got: {port}")
+    return port
+
+
+CALLBACK_PORT = _parse_port()
+
+# http://localhost is permitted for native OAuth apps per RFC 8252 Section 7.3.
+# The authorization code never leaves the local machine.
 REDIRECT_URI = f"http://localhost:{CALLBACK_PORT}/auth/callback"
 
 
@@ -55,8 +70,17 @@ def _build_auth_url(challenge: str, state: str) -> str:
     return f"{AUTH_ENDPOINT}?{urlencode(params)}"
 
 
+def _prepare_auth_session() -> tuple[str, str, str]:
+    """Generate PKCE + state and return (verifier, state, auth_url)."""
+    verifier, challenge = _generate_pkce()
+    state = secrets.token_hex(32)
+    return verifier, state, _build_auth_url(challenge, state)
+
+
 def _complete_login(code: str, verifier: str) -> str:
     """Exchange authorization code for tokens and API key. Returns the API key."""
+    import httpx
+
     resp = httpx.post(
         TOKEN_ENDPOINT,
         data={
@@ -103,9 +127,7 @@ def login() -> str:
     Opens the browser for authentication and starts a local HTTP server
     to receive the callback. Returns the obtained OpenAI API key.
     """
-    verifier, challenge = _generate_pkce()
-    state = secrets.token_hex(32)
-    auth_url = _build_auth_url(challenge, state)
+    verifier, state, auth_url = _prepare_auth_session()
 
     received_code = None
     done_event = Event()
@@ -170,9 +192,7 @@ def login_headless() -> str:
     then waits for the user to paste the callback URL.
     Returns the obtained OpenAI API key.
     """
-    verifier, challenge = _generate_pkce()
-    state = secrets.token_hex(32)
-    auth_url = _build_auth_url(challenge, state)
+    verifier, state, auth_url = _prepare_auth_session()
 
     print(f"\nOpen this URL in a browser:\n\n{auth_url}\n")
     print("After login, paste the full callback URL here:")
@@ -211,10 +231,11 @@ def login_with_server(
 
     Returns:
         The auth URL to open in a browser.
+
+    Raises:
+        RuntimeError: If the callback port is already in use.
     """
-    verifier, challenge = _generate_pkce()
-    state = secrets.token_hex(32)
-    auth_url = _build_auth_url(challenge, state)
+    verifier, state, auth_url = _prepare_auth_session()
 
     done = Event()
 
@@ -255,7 +276,7 @@ def login_with_server(
                     try:
                         on_success(plan_type)
                     except Exception:
-                        logger.exception("on_success callback failed")
+                        logger.error("on_success callback failed")
 
             except Exception as e:
                 logger.error("Auto-callback login failed: %s", type(e).__name__)
@@ -263,8 +284,8 @@ def login_with_server(
                 self.send_header("Content-Type", "text/html; charset=utf-8")
                 self.end_headers()
                 self.wfile.write(
-                    f"<html><body><h2>Login failed</h2>"
-                    f"<p>{escape(str(e))}</p></body></html>".encode()
+                    b"<html><body><h2>Login failed</h2>"
+                    b"<p>Authentication error. Check the terminal for details.</p></body></html>"
                 )
 
             done.set()
@@ -274,9 +295,11 @@ def login_with_server(
 
     try:
         server = HTTPServer((bind_address, CALLBACK_PORT), CallbackHandler)
-    except OSError:
-        logger.warning("Port %d busy, returning auth URL for manual flow", CALLBACK_PORT)
-        return auth_url
+    except OSError as e:
+        raise RuntimeError(
+            f"Port {CALLBACK_PORT} is already in use. "
+            "Set OPENAI_OAUTH_PORT to a free port."
+        ) from e
 
     server.timeout = 1
 

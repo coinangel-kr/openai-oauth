@@ -1,10 +1,11 @@
 """Token storage, refresh, and validation for OpenAI OAuth."""
 
 import base64
-import hashlib
 import json
 import logging
+import os
 import secrets
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -13,25 +14,54 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
-# --- Constants ---
+# --- Constants (configurable via environment variables) ---
 ISSUER = "https://auth.openai.com"
-CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
+CLIENT_ID = os.environ.get("OPENAI_OAUTH_CLIENT_ID", "app_EMoamEEZ73f0CkXaXp7hrann")
 TOKEN_ENDPOINT = f"{ISSUER}/oauth/token"
 SCOPES = "openid profile email offline_access"
+JWKS_URI = f"{ISSUER}/.well-known/jwks.json"
 
 DATA_DIR = Path.home() / ".openai-oauth"
 TOKEN_FILE = DATA_DIR / "tokens.json"
 
 _refresh_lock = threading.Lock()
 
+# Lazy-initialized singleton for JWKS key caching
+_jwks_client = None
+_jwks_lock = threading.Lock()
+
+
+def _get_jwks_client():
+    """Get or create the singleton PyJWKClient (caches keys for 5 min)."""
+    global _jwks_client
+    if _jwks_client is None:
+        with _jwks_lock:
+            if _jwks_client is None:
+                from jwt import PyJWKClient
+                _jwks_client = PyJWKClient(
+                    JWKS_URI, cache_jwk_set=True, lifespan=300,
+                )
+    return _jwks_client
+
 
 # --- Token storage ---
 
 def _save_tokens(data: dict) -> None:
+    """Atomically save tokens to disk (write-then-rename)."""
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     DATA_DIR.chmod(0o700)
-    TOKEN_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
-    TOKEN_FILE.chmod(0o600)
+    fd, tmp_path = tempfile.mkstemp(dir=DATA_DIR, prefix=".tokens_")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+        os.chmod(tmp_path, 0o600)
+        os.replace(tmp_path, TOKEN_FILE)  # atomic on POSIX
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
 
 
 def _load_tokens() -> dict | None:
@@ -44,7 +74,44 @@ def _load_tokens() -> dict | None:
 
 
 def _decode_jwt_payload(token: str) -> dict:
-    """Decode the payload of a JWT without verification (client-side use only)."""
+    """Decode and optionally verify the JWT payload.
+
+    If PyJWT with cryptography is installed (pip install openai-oauth[crypto]),
+    the JWT signature is verified against OpenAI's JWKS endpoint.
+
+    - Signature verification failure raises (token may be tampered).
+    - Network/JWKS fetch errors fall back to unverified decode with a warning.
+    - If PyJWT is not installed, falls back to unverified decode (acceptable
+      because the token is received directly from OpenAI's HTTPS endpoint).
+    """
+    try:
+        import jwt
+
+        jwks_client = _get_jwks_client()
+        signing_key = jwks_client.get_signing_key_from_jwt(token)
+        return jwt.decode(
+            token,
+            signing_key.key,
+            algorithms=["RS256"],
+            audience=CLIENT_ID,
+            options={"verify_exp": False},  # We check expiry ourselves
+        )
+    except ImportError:
+        pass  # PyJWT not installed — fall back to unverified decode
+    except Exception as e:
+        # Distinguish signature failures from transient network errors
+        try:
+            import jwt as _jwt
+            if isinstance(e, _jwt.exceptions.InvalidTokenError):
+                # Genuine verification failure — do NOT fall back
+                logger.warning("JWT signature verification FAILED: %s", type(e).__name__)
+                raise
+        except ImportError:
+            pass
+        # Network/JWKS fetch error — fall back with warning
+        logger.warning("JWKS fetch failed (%s), using unverified JWT decode", type(e).__name__)
+
+    # Fallback: unverified decode (token came from OpenAI's HTTPS endpoint)
     parts = token.split(".")
     if len(parts) != 3:
         return {}
@@ -183,10 +250,10 @@ def get_status() -> dict:
 
 def logout() -> bool:
     """Securely remove stored tokens. Returns True if tokens were removed."""
-    if TOKEN_FILE.exists():
-        # Overwrite before deletion to prevent forensic recovery
+    try:
         size = TOKEN_FILE.stat().st_size
         TOKEN_FILE.write_bytes(b"\x00" * size)
         TOKEN_FILE.unlink()
         return True
-    return False
+    except FileNotFoundError:
+        return False

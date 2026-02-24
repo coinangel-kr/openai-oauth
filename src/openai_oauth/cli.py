@@ -2,44 +2,47 @@
 
 import argparse
 import sys
+import time
 
 
 def cmd_login(args):
     if args.headless:
         from .auth import login_headless
-        api_key = login_headless()
+        login_headless()
     elif args.server:
-        from .auth import login_with_server
-        auth_url = login_with_server()
+        from .auth import CALLBACK_PORT, login_with_server
+        timeout = 300
+        auth_url = login_with_server(timeout=timeout)
         print(f"\nOpen this URL in a browser:\n\n{auth_url}\n")
-        print("Waiting for callback on port 1455...")
+        print(f"Waiting for callback on port {CALLBACK_PORT}...")
         print("Press Ctrl+C to cancel.\n")
         try:
-            import time
-            while True:
-                from .tokens import is_authenticated
+            from .tokens import is_authenticated
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline:
                 if is_authenticated():
                     break
                 time.sleep(1)
+            else:
+                print("\nLogin timed out.")
+                sys.exit(1)
         except KeyboardInterrupt:
             print("\nCancelled.")
             return
-        api_key = None
     else:
         from .auth import login
-        api_key = login()
+        login()
 
-    if api_key:
-        print(f"\nLogin successful! API key saved.")
     from .tokens import get_status
     status = get_status()
     if status.get("authenticated"):
+        print("\nLogin successful!")
         print(f"Plan: {status.get('plan_type', 'unknown')}")
         print(f"Expires: {status.get('expires', 'unknown')}")
         print(f"Token file: {status.get('token_file', 'unknown')}")
 
 
-def cmd_status(args):
+def cmd_status(_args):
     from .tokens import get_status
     status = get_status()
 
@@ -47,14 +50,14 @@ def cmd_status(args):
         print("Not authenticated. Run: openai-oauth login")
         sys.exit(1)
 
-    print(f"Authenticated: yes")
+    print("Authenticated: yes")
     print(f"Plan: {status.get('plan_type', 'unknown')}")
     print(f"Expires: {status.get('expires', 'unknown')}")
     print(f"Expired: {'yes' if status.get('expired') else 'no'}")
     print(f"Token file: {status.get('token_file', 'unknown')}")
 
 
-def cmd_logout(args):
+def cmd_logout(_args):
     from .tokens import logout
     if logout():
         print("Logged out. Tokens removed.")
@@ -62,7 +65,7 @@ def cmd_logout(args):
         print("No tokens found.")
 
 
-def cmd_key(args):
+def cmd_key(_args):
     from .tokens import get_api_key
     try:
         api_key = get_api_key()
@@ -88,7 +91,7 @@ def main():
     )
     login_group.add_argument(
         "--server", action="store_true",
-        help="Server mode: start callback server on port 1455 (for Docker/remote)",
+        help="Server mode: start callback server (for Docker/remote). Port configurable via OPENAI_OAUTH_PORT",
     )
     login_parser.set_defaults(func=cmd_login)
 

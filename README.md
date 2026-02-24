@@ -38,6 +38,14 @@ pip install openai-oauth
 uv add openai-oauth
 ```
 
+For JWT signature verification (recommended for production):
+
+```bash
+pip install openai-oauth[crypto]
+# or
+uv add "openai-oauth[crypto]"
+```
+
 ## CLI Usage
 
 ### Login (opens browser)
@@ -111,6 +119,25 @@ auth_url = login_with_server(on_success=on_success)
 print(f"Open this URL: {auth_url}")
 # Server runs on port 1455, auto-completes when browser redirects back
 ```
+
+## Configuration
+
+Environment variables for customization:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `OPENAI_OAUTH_PORT` | `1455` | Callback server port |
+| `OPENAI_OAUTH_CLIENT_ID` | *(built-in)* | Override the OAuth client ID |
+
+## Security
+
+- **PKCE** (RFC 7636): Prevents authorization code interception
+- **State parameter**: CSRF protection with 256-bit random tokens
+- **Token storage**: `~/.openai-oauth/tokens.json` with `0600` permissions
+- **Secure logout**: Token file overwritten with zeros before deletion
+- **JWT verification**: Signature verified against OpenAI's JWKS when `[crypto]` extra is installed
+- **Localhost callback**: `http://localhost` redirect per RFC 8252 Section 7.3 (auth code never leaves the machine)
+- **HTML escaping**: All dynamic content in callback HTML responses is escaped
 
 ## Requirements
 

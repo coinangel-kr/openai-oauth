@@ -20,6 +20,11 @@ dependencies = [
     "httpx>=0.27.0",
 ]
 
+[project.optional-dependencies]
+crypto = [
+    "pyjwt[crypto]>=2.8.0",
+]
+
 [project.scripts]
 openai-oauth = "openai_oauth.cli:main"
 
