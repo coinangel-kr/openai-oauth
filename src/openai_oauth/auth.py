@@ -1,12 +1,13 @@
 """OAuth PKCE authentication flow for OpenAI."""
 
-import hashlib
 import base64
+import hashlib
 import logging
 import secrets
 import threading
 import time
 import webbrowser
+from html import escape
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from threading import Event
 from urllib.parse import parse_qs, urlencode, urlparse
@@ -75,7 +76,7 @@ def _complete_login(code: str, verifier: str) -> str:
     refresh_token = token_data.get("refresh_token")
     if not id_token or not refresh_token:
         raise RuntimeError(
-            f"Token response missing required fields. Got keys: {list(token_data.keys())}"
+            "Token response missing required fields (id_token or refresh_token)."
         )
 
     api_key = _exchange_for_api_key(id_token)
@@ -190,15 +191,23 @@ def login_headless() -> str:
     return _complete_login(code, verifier)
 
 
-def login_with_server(on_success=None, timeout: int = 300) -> str:
+def login_with_server(
+    on_success=None,
+    timeout: int = 300,
+    bind_address: str = "127.0.0.1",
+) -> str:
     """Start OAuth login with an automatic callback server.
 
-    Runs an HTTP server on port 1455 in a background thread to receive
-    the OAuth callback automatically. Useful for Docker or server environments.
+    Runs an HTTP server in a background thread to receive the OAuth
+    callback automatically. Useful for Docker or server environments.
 
     Args:
         on_success: Optional callback(plan_type: str) called on successful login.
         timeout: Server timeout in seconds (default 300s / 5 min).
+        bind_address: Address to bind the callback server to.
+            Use "127.0.0.1" (default) for local-only access.
+            Use "0.0.0.0" for Docker or remote environments where the
+            callback needs to be accessible from outside the container.
 
     Returns:
         The auth URL to open in a browser.
@@ -225,8 +234,7 @@ def login_with_server(on_success=None, timeout: int = 300) -> str:
                 self.send_response(400)
                 self.end_headers()
                 self.wfile.write(b"Invalid request")
-                done.set()
-                return
+                return  # Keep listening — don't stop server on invalid requests
 
             try:
                 _complete_login(code, verifier)
@@ -239,7 +247,7 @@ def login_with_server(on_success=None, timeout: int = 300) -> str:
                 self.end_headers()
                 self.wfile.write(
                     f"<html><body><h2>Login successful!</h2>"
-                    f"<p>Plan: {plan_type}</p>"
+                    f"<p>Plan: {escape(str(plan_type))}</p>"
                     f"<p>You can close this window.</p></body></html>".encode()
                 )
 
@@ -250,13 +258,13 @@ def login_with_server(on_success=None, timeout: int = 300) -> str:
                         logger.exception("on_success callback failed")
 
             except Exception as e:
-                logger.exception("Auto-callback login failed")
+                logger.error("Auto-callback login failed: %s", type(e).__name__)
                 self.send_response(500)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
                 self.end_headers()
                 self.wfile.write(
                     f"<html><body><h2>Login failed</h2>"
-                    f"<p>{e}</p></body></html>".encode()
+                    f"<p>{escape(str(e))}</p></body></html>".encode()
                 )
 
             done.set()
@@ -265,7 +273,7 @@ def login_with_server(on_success=None, timeout: int = 300) -> str:
             pass
 
     try:
-        server = HTTPServer(("0.0.0.0", CALLBACK_PORT), CallbackHandler)
+        server = HTTPServer((bind_address, CALLBACK_PORT), CallbackHandler)
     except OSError:
         logger.warning("Port %d busy, returning auth URL for manual flow", CALLBACK_PORT)
         return auth_url

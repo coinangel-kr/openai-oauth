@@ -182,8 +182,11 @@ def get_status() -> dict:
 
 
 def logout() -> bool:
-    """Remove stored tokens. Returns True if tokens were removed."""
+    """Securely remove stored tokens. Returns True if tokens were removed."""
     if TOKEN_FILE.exists():
+        # Overwrite before deletion to prevent forensic recovery
+        size = TOKEN_FILE.stat().st_size
+        TOKEN_FILE.write_bytes(b"\x00" * size)
         TOKEN_FILE.unlink()
         return True
     return False
