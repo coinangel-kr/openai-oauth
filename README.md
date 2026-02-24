@@ -33,17 +33,23 @@ Tokens are stored at `~/.openai-oauth/tokens.json` with `0600` permissions. The 
 ## Install
 
 ```bash
-pip install openai-oauth
-# or
-uv add openai-oauth
+pip install git+https://github.com/coinangel-kr/openai-oauth.git
+```
+
+Or clone and install locally:
+
+```bash
+git clone https://github.com/coinangel-kr/openai-oauth.git
+cd openai-oauth
+pip install .
 ```
 
 For JWT signature verification (recommended for production):
 
 ```bash
-pip install openai-oauth[crypto]
-# or
-uv add "openai-oauth[crypto]"
+pip install "openai-oauth[crypto] @ git+https://github.com/coinangel-kr/openai-oauth.git"
+# or locally:
+pip install ".[crypto]"
 ```
 
 ## CLI Usage
