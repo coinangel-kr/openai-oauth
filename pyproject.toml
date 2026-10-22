@@ -22,7 +22,7 @@ dependencies = [
 
 [project.optional-dependencies]
 crypto = [
-    "pyjwt[crypto]>=2.8.0",
+    "pyjwt[crypto]>=2.15.0",
 ]
 
 [project.scripts]
